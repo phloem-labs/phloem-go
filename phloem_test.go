@@ -1,9 +1,13 @@
 package phloem
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"math"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -299,4 +303,97 @@ func TestAKeyWithNoURLIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "PHLOEM_URL") {
 		t.Fatalf("the error does not say what to set: %v", err)
 	}
+}
+
+// standin starts the stand-in script every binding's tests share, and
+// returns where it is ready, and a reader for what it prints after. Skipped
+// where the stand-in is not beside this module (the published copy).
+func standin(t *testing.T, args ...string) (string, *bufio.Reader) {
+	t.Helper()
+	script := filepath.Join("..", "testing", "standin.py")
+	if _, err := os.Stat(script); err != nil {
+		t.Skip("the shared stand-ins are not beside this module")
+	}
+	cmd := exec.Command("python3", append([]string{script}, args...)...)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	r := bufio.NewReader(out)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimPrefix(strings.TrimSpace(line), "ready "), r
+}
+
+// Every SDK sends both ways: one reading through Phloem on this machine (a
+// stand-in door) and one straight to the cloud (a stand-in environment), each
+// closed cleanly.
+func TestBothRoutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in door is a Unix socket")
+	}
+	t.Run("local", func(t *testing.T) {
+		t.Setenv("PHLOEM_API_KEY", "")
+		path := filepath.Join(t.TempDir(), "ingest.sock")
+		_, out := standin(t, "door", path)
+		s, err := Open("go-local", WithSocketPath(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.LogNow("/rig/psi", 3.2); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		line, err := out.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Producer   string `json:"producer"`
+			DataFrames int    `json:"data_frames"`
+			Ended      bool   `json:"ended"`
+		}
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Producer != "go-local" || got.DataFrames != 1 || !got.Ended {
+			t.Fatalf("the door saw %+v", got)
+		}
+	})
+	t.Run("direct", func(t *testing.T) {
+		url, _ := standin(t, "env")
+		s, err := Open("go-direct", WithAPIKey("phla_test"), WithURL(url))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.LogNow("/rig/psi", 3.2); err != nil {
+			t.Fatal(err)
+		}
+		// Returns only once the stand-in says everything is stored.
+		if err := s.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Get(url + "/seen")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var seen struct {
+			Frames int `json:"frames"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&seen); err != nil {
+			t.Fatal(err)
+		}
+		if seen.Frames < 2 {
+			t.Fatalf("the environment saw %d frames", seen.Frames)
+		}
+	})
 }

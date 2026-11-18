@@ -104,3 +104,10 @@ Found a bug or need something? [Open an issue](https://github.com/phloem-labs/ph
 ## Licence
 
 Apache License 2.0. See `LICENSE`.
+
+## Platforms in this release
+
+- `darwin_amd64`
+- `darwin_arm64`
+- `linux_amd64`
+- `linux_arm64`
